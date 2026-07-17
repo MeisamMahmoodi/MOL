@@ -302,6 +302,8 @@ function updatePlayerUI(state) {
 
 // ---- 7b. MEDIA SESSION (Sperrbildschirm / Control Center) --------------------
 function updateMediaSession(track, state, isPaused) {
+  syncSilentAnchor(isPaused);
+
   if (!("mediaSession" in navigator)) return;
 
   navigator.mediaSession.metadata = new MediaMetadata({
@@ -337,6 +339,39 @@ function updateMediaSession(track, state, isPaused) {
 function unlockPlaybackAudio() {
   if (player && typeof player.activateElement === "function") {
     player.activateElement();
+  }
+  primeSilentAnchor();
+}
+
+// ---- 7c. SILENT-AUDIO-ANKER (Fix für Sperrbildschirm/Now-Playing) ----------
+// Das Web Playback SDK spielt den eigentlichen Sound in einem versteckten,
+// fremden iframe (sdk.scdn.co) ab. Der Browser koppelt die "Jetzt läuft"-
+// Anzeige des Betriebssystems an das Fenster/Frame, das GERADE Audio abspielt.
+// Da dieser iframe eine andere Origin hat, können wir dort keine
+// navigator.mediaSession-Daten setzen -> das OS zeigt stattdessen den Titel
+// des iframes ("Spotify Embedded Player") und ordnet Now-Playing-Taps nicht
+// zuverlässig unserer App zu.
+// Lösung: Ein eigenes, sehr leises Audio-Element im eigenen Dokument spielen,
+// synchron zum Wiedergabestatus. Dadurch "gehört" die Audio-Fokus-Session dem
+// Top-Frame unserer App, und unser eigenes navigator.mediaSession greift.
+function getSilentAnchor() {
+  return document.getElementById("silent-anchor");
+}
+
+function primeSilentAnchor() {
+  const anchor = getSilentAnchor();
+  if (!anchor) return;
+  anchor.volume = 0.02;
+  anchor.play().catch(() => {});
+}
+
+function syncSilentAnchor(isPaused) {
+  const anchor = getSilentAnchor();
+  if (!anchor) return;
+  if (isPaused) {
+    anchor.pause();
+  } else {
+    anchor.play().catch(() => {});
   }
 }
 
