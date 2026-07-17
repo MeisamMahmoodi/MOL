@@ -1,16 +1,12 @@
 /* =========================================================================
-   Meine Musik App – Spotify Integration
+   Meine Musik App – Spotify Integration (PWA)
    Auth: Authorization Code Flow mit PKCE (kein Client Secret nötig)
    Playback: Spotify Web Playback SDK (benötigt Spotify Premium)
    ========================================================================= */
 
 // ---- 1. KONFIGURATION -----------------------------------------------------
-// Trage hier deine eigene Client ID aus dem Spotify Developer Dashboard ein:
-// https://developer.spotify.com/dashboard
 const CLIENT_ID = "3ed25a0a5f6e4b6084dc1347644c823b";
 
-// Muss EXAKT mit der Redirect URI übereinstimmen, die du im Dashboard
-// hinterlegt hast (inkl. Slash am Ende, falls vorhanden).
 const REDIRECT_URI = window.location.origin + window.location.pathname;
 
 const SCOPES = [
@@ -19,6 +15,7 @@ const SCOPES = [
   "user-read-private",
   "user-read-playback-state",
   "user-modify-playback-state",
+  "user-read-recently-played",
   "playlist-read-private",
   "playlist-read-collaborative",
   "user-library-read",
@@ -40,8 +37,7 @@ function generateRandomString(length) {
 
 async function sha256(plain) {
   const encoder = new TextEncoder();
-  const data = encoder.encode(plain);
-  return crypto.subtle.digest("SHA-256", data);
+  return crypto.subtle.digest("SHA-256", encoder.encode(plain));
 }
 
 function base64UrlEncode(arrayBuffer) {
@@ -52,11 +48,10 @@ function base64UrlEncode(arrayBuffer) {
 }
 
 async function generateCodeChallenge(codeVerifier) {
-  const hashed = await sha256(codeVerifier);
-  return base64UrlEncode(hashed);
+  return base64UrlEncode(await sha256(codeVerifier));
 }
 
-// ---- 3. TOKEN SPEICHER (in-memory + sessionStorage für Reload-Überleben) --
+// ---- 3. TOKEN SPEICHER ------------------------------------------------------
 const TokenStore = {
   get accessToken() {
     return sessionStorage.getItem("sp_access_token");
@@ -100,10 +95,9 @@ async function redirectToSpotifyLogin() {
   window.location.href = `${AUTH_ENDPOINT}?${params.toString()}`;
 }
 
-// ---- 5. CODE GEGEN TOKEN TAUSCHEN ------------------------------------------
+// ---- 5. TOKEN AUSTAUSCH / REFRESH -------------------------------------------
 async function exchangeCodeForToken(code) {
   const codeVerifier = sessionStorage.getItem("sp_code_verifier");
-
   const body = new URLSearchParams({
     client_id: CLIENT_ID,
     grant_type: "authorization_code",
@@ -117,13 +111,8 @@ async function exchangeCodeForToken(code) {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });
-
-  if (!res.ok) {
-    throw new Error("Token-Austausch fehlgeschlagen: " + (await res.text()));
-  }
-
-  const data = await res.json();
-  TokenStore.save(data);
+  if (!res.ok) throw new Error("Token-Austausch fehlgeschlagen: " + (await res.text()));
+  TokenStore.save(await res.json());
 }
 
 async function refreshAccessToken() {
@@ -141,10 +130,8 @@ async function refreshAccessToken() {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });
-
   if (!res.ok) return false;
-  const data = await res.json();
-  TokenStore.save(data);
+  TokenStore.save(await res.json());
   return true;
 }
 
@@ -176,9 +163,7 @@ async function getCurrentUser() {
 }
 
 async function searchTracks(query) {
-  // Seit dem Spotify-API-Update von Februar 2026 liegt der maximale "limit"-Wert
-  // für Development-Mode-Apps bei 10 (vorher 50) - siehe:
-  // https://developer.spotify.com/documentation/web-api/references/changes/february-2026
+  // Seit Februar 2026 liegt der max. "limit" für Development-Mode-Apps bei 10.
   const data = await spotifyFetch(
     `/search?q=${encodeURIComponent(query)}&type=track&limit=10`
   );
@@ -191,11 +176,21 @@ async function getUserPlaylists() {
 }
 
 async function getPlaylistTracks(playlistId) {
-  // GET /playlists/{id}/tracks wurde im Februar-2026-Update entfernt,
-  // ersetzt durch GET /playlists/{id}/items. Das Feld "track" pro Eintrag
-  // heißt jetzt "item". Wir prüfen defensiv auf beide Varianten.
+  // GET /playlists/{id}/tracks wurde entfernt, ersetzt durch .../items
   const data = await spotifyFetch(`/playlists/${playlistId}/items?limit=50`);
   return data.items.map((i) => i.item ?? i.track).filter(Boolean);
+}
+
+async function getRecentlyPlayed() {
+  const data = await spotifyFetch("/me/player/recently-played?limit=10");
+  const seen = new Set();
+  const tracks = [];
+  for (const item of data.items) {
+    if (!item.track || seen.has(item.track.id)) continue;
+    seen.add(item.track.id);
+    tracks.push(item.track);
+  }
+  return tracks;
 }
 
 async function playTrackUris(uris, deviceId) {
@@ -205,37 +200,54 @@ async function playTrackUris(uris, deviceId) {
   });
 }
 
+async function playContext(contextUri, deviceId, offsetUri) {
+  const body = { context_uri: contextUri };
+  if (offsetUri) body.offset = { uri: offsetUri };
+  await spotifyFetch(`/me/player/play?device_id=${deviceId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+async function setShuffle(state, deviceId) {
+  await spotifyFetch(`/me/player/shuffle?state=${state}&device_id=${deviceId}`, {
+    method: "PUT",
+  });
+}
+
+async function setRepeat(state, deviceId) {
+  await spotifyFetch(`/me/player/repeat?state=${state}&device_id=${deviceId}`, {
+    method: "PUT",
+  });
+}
+
 // ---- 7. WEB PLAYBACK SDK ----------------------------------------------------
 let player = null;
 let deviceId = null;
+let currentPlaylistUri = null;
+let shuffleOn = false;
+let repeatOn = false;
+let latestState = null;
+let progressTimer = null;
 
-window.onSpotifyWebPlaybackSDKReady = () => {
-  // Der Player wird erst nach erfolgreichem Login initialisiert (siehe init()).
-};
+window.onSpotifyWebPlaybackSDKReady = () => {};
 
 function createPlayer() {
   player = new Spotify.Player({
     name: "Meine Musik App",
-    getOAuthToken: (cb) => {
-      getValidToken().then(cb);
-    },
-    volume: 0.5,
+    getOAuthToken: (cb) => getValidToken().then(cb),
+    volume: 0.8,
   });
 
   player.addListener("ready", ({ device_id }) => {
     deviceId = device_id;
-    console.log("Player bereit, device_id:", device_id);
   });
-
-  player.addListener("not_ready", ({ device_id }) => {
-    console.log("Device offline:", device_id);
-  });
-
+  player.addListener("not_ready", () => {});
   player.addListener("player_state_changed", (state) => {
     if (!state) return;
-    updateNowPlaying(state);
+    latestState = state;
+    updatePlayerUI(state);
   });
-
   player.addListener("initialization_error", ({ message }) => console.error(message));
   player.addListener("authentication_error", ({ message }) => console.error(message));
   player.addListener("account_error", ({ message }) =>
@@ -243,154 +255,315 @@ function createPlayer() {
   );
 
   player.connect();
+
+  progressTimer = setInterval(() => {
+    if (!latestState || latestState.paused) return;
+    latestState.position += 500;
+    renderProgress(latestState.position, latestState.duration);
+  }, 500);
 }
 
-function updateNowPlaying(state) {
+function formatTime(ms) {
+  const totalSec = Math.floor(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = String(totalSec % 60).padStart(2, "0");
+  return `${min}:${sec}`;
+}
+
+function renderProgress(position, duration) {
+  const pct = duration ? Math.min(100, (position / duration) * 100) : 0;
+  document.getElementById("progress-fill").style.width = pct + "%";
+  document.getElementById("time-current").textContent = formatTime(position);
+  document.getElementById("time-total").textContent = formatTime(duration);
+}
+
+function updatePlayerUI(state) {
   const track = state.track_window.current_track;
-  document.getElementById("track-name").textContent = track.name;
-  document.getElementById("track-artist").textContent = track.artists
-    .map((a) => a.name)
-    .join(", ");
-  document.getElementById("track-cover").src = track.album.images[0]?.url || "";
-  document.getElementById("play-pause-btn").textContent = state.paused ? "▶️" : "⏸";
-  document.getElementById("player-bar").classList.remove("hidden");
+  const coverUrl = track.album.images?.[0]?.url || "";
+  const isPaused = state.paused;
+
+  document.getElementById("mini-player").classList.remove("hidden");
+  document.getElementById("mini-cover").src = coverUrl;
+  document.getElementById("mini-title").textContent = track.name;
+  document.getElementById("mini-artist").textContent = track.artists.map((a) => a.name).join(", ");
+  document.getElementById("mini-play-icon").setAttribute("href", isPaused ? "#i-play" : "#i-pause");
+
+  document.getElementById("player-cover").src = coverUrl;
+  document.getElementById("player-title").textContent = track.name;
+  document.getElementById("player-artist").textContent = track.artists.map((a) => a.name).join(", ");
+  document.getElementById("play-pause-icon").setAttribute("href", isPaused ? "#i-play" : "#i-pause");
+
+  renderProgress(state.position, state.duration);
 }
 
 // ---- 8. UI RENDERING --------------------------------------------------------
-function renderTrackList(container, tracks, onClick) {
+function coverUrlFor(item) {
+  return item.images?.[0]?.url || item.album?.images?.[0]?.url || "";
+}
+
+function renderRowList(container, items, { onClick, subtitleFor }) {
   container.innerHTML = "";
-  tracks.forEach((track) => {
+  if (!items.length) {
+    container.innerHTML = `<div class="row-empty">Nichts gefunden.</div>`;
+    return;
+  }
+  items.forEach((item) => {
+    if (!item) return;
+    const btn = document.createElement("button");
+    btn.className = "row-item";
+    btn.innerHTML = `
+      <img class="cover cover-sm" src="${coverUrlFor(item)}" alt="" />
+      <div class="row-meta">
+        <div class="row-title">${item.name}</div>
+        <div class="row-sub">${subtitleFor(item)}</div>
+      </div>
+      <svg class="icon row-chevron" width="14" height="14"><use href="#i-chevron-right"/></svg>
+    `;
+    btn.addEventListener("click", () => onClick(item));
+    container.appendChild(btn);
+  });
+}
+
+function renderTrackRows(container, tracks, onClick) {
+  container.innerHTML = "";
+  tracks.forEach((track, i) => {
     if (!track) return;
-    const li = document.createElement("li");
-    li.className = "track-item";
-    li.innerHTML = `
-      <img src="${track.album?.images?.[2]?.url || track.album?.images?.[0]?.url || ""}" alt="" />
-      <div class="meta">
-        <div class="title">${track.name}</div>
-        <div class="subtitle">${track.artists.map((a) => a.name).join(", ")}</div>
+    const row = document.createElement("div");
+    row.className = "track-row";
+    row.innerHTML = `
+      <span class="track-index">${i + 1}</span>
+      <div class="row-meta">
+        <div class="row-title">${track.name}</div>
+        <div class="row-sub">${track.artists.map((a) => a.name).join(", ")}</div>
       </div>
     `;
-    li.addEventListener("click", () => onClick(track));
-    container.appendChild(li);
+    row.addEventListener("click", () => onClick(track));
+    container.appendChild(row);
   });
 }
 
-function renderPlaylists(container, playlists) {
-  container.innerHTML = "";
-  playlists.forEach((pl) => {
-    if (!pl) return; // z.B. gelöschte/nicht mehr verfügbare Playlist-Referenzen
-    const li = document.createElement("li");
-    li.className = "track-item";
-    li.innerHTML = `
-      <img src="${pl.images?.[0]?.url || ""}" alt="" />
-      <div class="meta">
-        <div class="title">${pl.name}</div>
-        <div class="subtitle">${pl.items?.total ?? pl.tracks?.total ?? 0} Songs</div>
-      </div>
-    `;
-    li.addEventListener("click", async () => {
-      const tracks = await getPlaylistTracks(pl.id);
-      renderTrackList(
-        document.getElementById("playlist-tracks"),
-        tracks,
-        (track) => playTrackUris([track.uri], deviceId)
-      );
-    });
-    container.appendChild(li);
+// ---- 9. NAVIGATION -----------------------------------------------------------
+function switchTab(tab) {
+  document.querySelectorAll("#screens > .screen").forEach((el) => el.classList.add("hidden"));
+  document.getElementById(`${tab}-screen`).classList.remove("hidden");
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.tab === tab);
   });
 }
 
-// ---- 9. APP-INITIALISIERUNG --------------------------------------------------
+function openPlaylistDetail() {
+  document.querySelectorAll("#screens > .screen").forEach((el) => el.classList.add("hidden"));
+  document.getElementById("playlist-screen").classList.remove("hidden");
+}
+
+function closePlaylistDetail() {
+  switchTab("library");
+}
+
+function openPlayerOverlay() {
+  document.getElementById("player-overlay").classList.remove("hidden");
+}
+function closePlayerOverlay() {
+  document.getElementById("player-overlay").classList.add("hidden");
+}
+
+// ---- 10. APP-INITIALISIERUNG --------------------------------------------------
+async function ensureDevice() {
+  let tries = 0;
+  while (!deviceId && tries < 20) {
+    await new Promise((r) => setTimeout(r, 250));
+    tries++;
+  }
+  return deviceId;
+}
+
+async function playTrack(track) {
+  const id = await ensureDevice();
+  if (!id) return;
+  playTrackUris([track.uri], id);
+}
+
+async function playPlaylist(playlist, offsetTrackUri) {
+  const id = await ensureDevice();
+  if (!id) return;
+  currentPlaylistUri = playlist.uri;
+  playContext(playlist.uri, id, offsetTrackUri);
+}
+
 async function showAppView(user) {
   document.getElementById("login-view").classList.add("hidden");
-  document.getElementById("app-view").classList.remove("hidden");
+  document.getElementById("app-shell").classList.remove("hidden");
 
-  const userInfo = document.getElementById("user-info");
-  userInfo.classList.remove("hidden");
   document.getElementById("user-name").textContent = user.display_name || user.id;
-  if (user.images?.[0]?.url) {
-    document.getElementById("user-avatar").src = user.images[0].url;
-  }
+  const avatarUrl = user.images?.[0]?.url;
+  if (avatarUrl) document.getElementById("user-avatar").src = avatarUrl;
+
+  const hour = new Date().getHours();
+  document.getElementById("greeting").textContent =
+    hour < 11 ? "Guten Morgen" : hour < 18 ? "Guten Tag" : "Guten Abend";
 
   createPlayer();
 
-  const playlists = await getUserPlaylists();
-  renderPlaylists(document.getElementById("playlists"), playlists);
+  try {
+    const recent = await getRecentlyPlayed();
+    renderRowList(document.getElementById("recent-tracks"), recent, {
+      subtitleFor: (t) => t.artists.map((a) => a.name).join(", "),
+      onClick: (track) => playTrack(track),
+    });
+  } catch (err) {
+    console.error("Zuletzt gehört konnte nicht geladen werden:", err);
+  }
+
+  try {
+    const playlists = await getUserPlaylists();
+    renderRowList(document.getElementById("library-playlists"), playlists, {
+      subtitleFor: (p) => `${p.items?.total ?? p.tracks?.total ?? 0} Songs`,
+      onClick: async (playlist) => {
+        document.getElementById("playlist-cover").src = coverUrlFor(playlist);
+        document.getElementById("playlist-title").textContent = playlist.name;
+        document.getElementById("playlist-sub").textContent = `${
+          playlist.items?.total ?? playlist.tracks?.total ?? 0
+        } Songs`;
+        openPlaylistDetail();
+
+        document.getElementById("playlist-tracks").innerHTML = "";
+        const tracks = await getPlaylistTracks(playlist.id);
+        renderTrackRows(document.getElementById("playlist-tracks"), tracks, (track) =>
+          playPlaylist(playlist, track.uri)
+        );
+
+        document.getElementById("playlist-play-btn").onclick = () => playPlaylist(playlist);
+      },
+    });
+  } catch (err) {
+    console.error("Playlists konnten nicht geladen werden:", err);
+  }
 }
 
 function wireUpControls() {
   document.getElementById("login-btn").addEventListener("click", redirectToSpotifyLogin);
 
-  document.getElementById("logout-btn").addEventListener("click", () => {
-    TokenStore.clear();
-    window.location.href = REDIRECT_URI;
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
   });
 
-  document.getElementById("search-btn").addEventListener("click", doSearch);
+  document.getElementById("playlist-back").addEventListener("click", closePlaylistDetail);
+
+  document.getElementById("mini-player").addEventListener("click", openPlayerOverlay);
+  document.getElementById("player-close").addEventListener("click", closePlayerOverlay);
+
+  document.getElementById("mini-play-btn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    player?.togglePlay();
+  });
+  document.getElementById("play-pause-btn").addEventListener("click", () => player?.togglePlay());
+  document.getElementById("next-btn").addEventListener("click", () => player?.nextTrack());
+  document.getElementById("prev-btn").addEventListener("click", () => player?.previousTrack());
+
+  document.getElementById("shuffle-btn").addEventListener("click", async () => {
+    shuffleOn = !shuffleOn;
+    document.getElementById("shuffle-btn").classList.toggle("muted", !shuffleOn);
+    if (deviceId) setShuffle(shuffleOn, deviceId).catch(() => {});
+  });
+  document.getElementById("repeat-btn").addEventListener("click", async () => {
+    repeatOn = !repeatOn;
+    document.getElementById("repeat-btn").classList.toggle("muted", !repeatOn);
+    if (deviceId) setRepeat(repeatOn ? "context" : "off", deviceId).catch(() => {});
+  });
+
   document.getElementById("search-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doSearch();
   });
-
-  document.getElementById("play-pause-btn").addEventListener("click", () => {
-    player?.togglePlay();
-  });
-  document.getElementById("next-btn").addEventListener("click", () => player?.nextTrack());
-  document.getElementById("prev-btn").addEventListener("click", () => player?.previousTrack());
-  document.getElementById("volume-slider").addEventListener("input", (e) => {
-    player?.setVolume(Number(e.target.value) / 100);
+  document.getElementById("search-input").addEventListener("input", () => {
+    clearTimeout(window.__searchDebounce);
+    window.__searchDebounce = setTimeout(doSearch, 400);
   });
 }
 
 async function doSearch() {
   const query = document.getElementById("search-input").value.trim();
-  if (!query) return;
-  const tracks = await searchTracks(query);
-  renderTrackList(document.getElementById("search-results"), tracks, (track) => {
-    if (!deviceId) {
-      alert("Player wird noch initialisiert, bitte kurz warten…");
-      return;
-    }
-    playTrackUris([track.uri], deviceId);
-  });
+  const label = document.getElementById("search-label");
+  const container = document.getElementById("search-results");
+  if (!query) {
+    container.innerHTML = "";
+    label.textContent = "";
+    return;
+  }
+  label.textContent = "Ergebnisse";
+  try {
+    const tracks = await searchTracks(query);
+    renderRowList(container, tracks, {
+      subtitleFor: (t) => t.artists.map((a) => a.name).join(", "),
+      onClick: (track) => playTrack(track),
+    });
+  } catch (err) {
+    console.error(err);
+  }
 }
 
 async function init() {
   wireUpControls();
 
-  // Fall A: Wir kommen gerade von Spotify zurück (?code=...)
   const params = new URLSearchParams(window.location.search);
   const code = params.get("code");
 
   if (code) {
     await exchangeCodeForToken(code);
-    // Code aus der URL entfernen, damit ein Reload nicht erneut versucht wird
     window.history.replaceState({}, document.title, REDIRECT_URI);
   }
 
-  // Fall B: Wir haben (jetzt) einen gültigen Token -> App zeigen
   if (TokenStore.isValid() || TokenStore.refreshToken) {
     let user;
     try {
       user = await getCurrentUser();
     } catch (err) {
-      // Nur bei einem echten Auth-Fehler (z.B. abgelaufener/ungültiger Token)
-      // die Tokens löschen und zum Login zurückfallen.
       console.error("Auth-Fehler:", err);
       TokenStore.clear();
       return;
     }
-
     try {
       await showAppView(user);
     } catch (err) {
-      // Fehler beim Rendern der App-Ansicht sind kein Auth-Problem -
-      // Tokens bleiben gültig, nur loggen statt Login zu erzwingen.
       console.error("Fehler beim Laden der App-Ansicht:", err);
     }
-    return;
   }
-
-  // Fall C: Kein Token -> Login-Ansicht bleibt sichtbar
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+// ---- 11. PWA / SERVICE WORKER -------------------------------------------------
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").then((registration) => {
+      // Regelmäßig auf ein neues Service-Worker-Update prüfen.
+      setInterval(() => registration.update(), 60 * 1000);
+
+      function promptUpdate(worker) {
+        const toast = document.getElementById("update-toast");
+        toast.classList.remove("hidden");
+        document.getElementById("update-reload-btn").onclick = () => {
+          worker.postMessage({ type: "SKIP_WAITING" });
+        };
+      }
+
+      if (registration.waiting) promptUpdate(registration.waiting);
+
+      registration.addEventListener("updatefound", () => {
+        const newWorker = registration.installing;
+        newWorker.addEventListener("statechange", () => {
+          if (newWorker.state === "installed" && navigator.serviceWorker.controller) {
+            promptUpdate(newWorker);
+          }
+        });
+      });
+    });
+
+    // Sobald der neue Service Worker aktiv ist, Seite neu laden.
+    let refreshing = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (refreshing) return;
+      refreshing = true;
+      window.location.reload();
+    });
+  });
+}

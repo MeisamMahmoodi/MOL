@@ -1,83 +1,91 @@
-# Meine Musik App (Spotify-Integration)
+# Meine Musik App (Spotify-Integration, PWA)
 
-Eine kleine Web-App, die Songs über die Spotify Web API sucht und über das
-**Spotify Web Playback SDK** direkt im Browser abspielt.
+Eine Musik-App im Swiss/Apple-Look, die Songs über die Spotify Web API sucht
+und über das **Spotify Web Playback SDK** direkt im Browser abspielt.
+Installierbar als PWA auf dem Homescreen (iOS/Android).
 
-Wichtig: Zum Abspielen brauchen deine Nutzer (bzw. du selbst) einen
-**Spotify Premium**-Account. Die App streamt nur über Spotify — es werden
-keine Dateien heruntergeladen oder gehostet.
+Wichtig: Zum Abspielen wird ein **Spotify Premium**-Account benötigt. Die App
+streamt nur über Spotify — es werden keine Dateien heruntergeladen oder gehostet.
+
+## Live
+
+https://mol-omega.vercel.app (automatisch deployt aus diesem Repo via Vercel)
+
+## Struktur
+
+```
+index.html    App-Shell, Screens (Home / Suche / Bibliothek / Playlist / Player)
+style.css     Design (helles Swiss/Apple-Layout, "liquid glass" Tab-Bar)
+app.js        Spotify-Auth (PKCE), Web API Calls, Web Playback SDK, Service-Worker-Registrierung
+sw.js         Service Worker für Offline-Cache + automatische Updates
+manifest.json PWA-Manifest (Icons, Name, Standalone-Modus)
+icons/        App-Icons (192, 512, maskable, Apple Touch Icon)
+```
 
 ## 1. Spotify App registrieren
 
-1. Gehe zum [Spotify for Developers Dashboard](https://developer.spotify.com/dashboard).
-2. Klicke auf **Create app**.
-3. Trage einen Namen ein, z.B. "Meine Musik App".
-4. Bei **Redirect URIs** genau die URL eintragen, unter der du die App lokal
-   öffnest, z.B.:
-   ```
-   http://127.0.0.1:5500/
-   ```
-   (Der Slash am Ende ist wichtig – muss exakt mit `REDIRECT_URI` in `app.js`
-   übereinstimmen.)
-5. Bei **Which API/SDKs are you planning to use?** die Option
+1. [Spotify for Developers Dashboard](https://developer.spotify.com/dashboard) → **Create app**.
+2. Bei **Redirect URIs** die Produktions-URL (mit Slash am Ende) eintragen,
+   z.B. `https://mol-omega.vercel.app/`.
+3. Bei **Which API/SDKs are you planning to use?** **Web API** und
    **Web Playback SDK** ankreuzen.
-6. Speichern und die **Client ID** aus den App-Settings kopieren.
+4. Client ID aus den App-Settings kopieren und in `app.js` bei `CLIENT_ID`
+   eintragen. Ein Client Secret wird **nicht** benötigt (PKCE-Flow läuft
+   komplett im Browser).
 
-## 2. Client ID eintragen
+Hinweis: Seit Februar 2026 läuft eine neu erstellte App automatisch im
+**Development Mode** mit eingeschränktem Zugriff (u.a. `limit` bei der Suche
+max. 10, bis zu 5 autorisierte Nutzer). Für mehr Details: [Web API Changelog
+Februar 2026](https://developer.spotify.com/documentation/web-api/references/changes/february-2026).
 
-Öffne `app.js` und ersetze:
+## 2. Deploy (Vercel + GitHub)
 
-```js
-const CLIENT_ID = "DEINE_SPOTIFY_CLIENT_ID";
-```
+Das Repo ist mit Vercel verbunden — jeder Push auf `main` deployt automatisch
+neu. Kein manuelles Hochladen mehr nötig.
 
-Ein Client Secret wird **nicht** benötigt – die App nutzt den
-Authorization-Code-Flow mit PKCE, der komplett im Browser läuft.
+## 3. PWA installieren
 
-## 3. Lokal starten
+- **iOS**: Seite in Safari öffnen → Teilen-Button → "Zum Home-Bildschirm".
+- **Android/Desktop Chrome**: Seite öffnen → Adressleiste zeigt ein
+  Installieren-Symbol, oder Menü → "App installieren".
 
-Die App muss über `http://` (nicht `file://`) laufen, sonst lehnt Spotify
-den Login ab. Einfachster Weg:
+## 4. Updates & Cache
 
-```bash
-cd spotify-music-app
-npx serve -l 5500
-```
+Die App aktualisiert sich selbst — **kein Löschen/Neuinstallieren nötig**:
 
-Dann im Browser öffnen: `http://127.0.0.1:5500`
+1. Der Service Worker (`sw.js`) prüft alle 60 Sekunden sowie bei jedem
+   Öffnen der App auf eine neue Version.
+2. Ist eine neue Version verfügbar, erscheint unten ein Hinweis
+   "Neue Version verfügbar" mit einem "Aktualisieren"-Button.
+3. Klick darauf lädt die neue Version und startet die Seite neu.
 
-(Alternative: `python3 -m http.server 5500`)
-
-Achte darauf, dass Port und Pfad exakt zur Redirect URI im Dashboard passen.
-
-## 4. Nutzen
-
-1. "Mit Spotify einloggen" klicken → Spotify-Login/Consent-Screen.
-2. Nach Rückleitung: Playlists werden geladen, Suche ist nutzbar.
-3. Song anklicken → Wiedergabe startet direkt im Browser über den
-   eingebetteten Player ("Meine Musik App" taucht auch in der offiziellen
-   Spotify-App als verfügbares Gerät auf).
+**Wichtig für jedes Update mit Code-Änderungen:** In `sw.js` die Konstante
+`CACHE_VERSION` erhöhen (z.B. `"v1"` → `"v2"`). Nur so merkt der Service
+Worker zuverlässig, dass sich etwas geändert hat, und zeigt den
+Update-Hinweis an. Ohne Versionserhöhung könnte der alte Cache teilweise
+bestehen bleiben.
 
 ## Funktionsumfang
 
 - Login via OAuth 2.0 / PKCE (kein Backend nötig)
-- Songsuche über die Web API
-- Anzeige & Wiedergabe eigener Playlists
-- Player-Leiste mit Play/Pause, Skip, Lautstärke
+- Home: zuletzt gehörte Songs
+- Suche über die Web API
+- Bibliothek: eigene Playlists inkl. Detailansicht mit Tracklist
+- Vollbild-Player: Play/Pause, Skip, Shuffle, Repeat, Fortschrittsanzeige
+- Installierbare PWA mit Offline-App-Shell und automatischen Updates
 
 ## Bekannte Grenzen (durch Spotify vorgegeben)
 
 - Erfordert Spotify Premium zum Abspielen.
-- Kein Download / keine Offline-Nutzung, kein Umgehen von Werbung im Free-Tier.
-- Tokens liegen aktuell in `sessionStorage` (verschwinden bei Tab-Schließung) –
-  für eine "richtige" Produktions-App würde man Tokens sicherer verwalten
-  und Refresh-Token-Rotation serverseitig absichern.
+- Kein Download / keine Offline-Musikwiedergabe — nur Streaming über Spotify.
+- App läuft im Development Mode: nur bis zu 5 autorisierte Spotify-Accounts
+  können sich einloggen, solange keine Extended-Quota-Freigabe von Spotify
+  vorliegt.
+- Tokens liegen in `sessionStorage` (verschwinden bei Tab-/App-Schließung).
 
 ## Mögliche nächste Schritte
 
-- Eigenes Backend für sicheres Token-Handling (z.B. wenn du die App
-  veröffentlichen willst).
-- "Meine Bibliothek" (gespeicherte Songs) via `/me/tracks`.
+- Eigenes Backend für sicheres Token-Handling, falls die App für mehr als
+  5 Nutzer geöffnet werden soll (Extended Quota Mode bei Spotify beantragen).
 - Warteschlange / Queue-Ansicht.
-- Deploy z.B. auf Vercel/Netlify (dort dann die Produktions-URL als
-  zusätzliche Redirect URI im Dashboard eintragen).
+- Offline-Hinweis-UI, wenn kein Netz verfügbar ist.
