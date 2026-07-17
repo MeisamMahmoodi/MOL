@@ -52,25 +52,27 @@ async function generateCodeChallenge(codeVerifier) {
 }
 
 // ---- 3. TOKEN SPEICHER ------------------------------------------------------
+// localStorage statt sessionStorage: Login bleibt auch nach dem Schließen und
+// Neu-Öffnen der (installierten) PWA erhalten.
 const TokenStore = {
   get accessToken() {
-    return sessionStorage.getItem("sp_access_token");
+    return localStorage.getItem("sp_access_token");
   },
   get refreshToken() {
-    return sessionStorage.getItem("sp_refresh_token");
+    return localStorage.getItem("sp_refresh_token");
   },
   get expiresAt() {
-    return Number(sessionStorage.getItem("sp_expires_at") || 0);
+    return Number(localStorage.getItem("sp_expires_at") || 0);
   },
   save({ access_token, refresh_token, expires_in }) {
-    sessionStorage.setItem("sp_access_token", access_token);
-    if (refresh_token) sessionStorage.setItem("sp_refresh_token", refresh_token);
-    sessionStorage.setItem("sp_expires_at", String(Date.now() + expires_in * 1000));
+    localStorage.setItem("sp_access_token", access_token);
+    if (refresh_token) localStorage.setItem("sp_refresh_token", refresh_token);
+    localStorage.setItem("sp_expires_at", String(Date.now() + expires_in * 1000));
   },
   clear() {
-    sessionStorage.removeItem("sp_access_token");
-    sessionStorage.removeItem("sp_refresh_token");
-    sessionStorage.removeItem("sp_expires_at");
+    localStorage.removeItem("sp_access_token");
+    localStorage.removeItem("sp_refresh_token");
+    localStorage.removeItem("sp_expires_at");
   },
   isValid() {
     return !!this.accessToken && Date.now() < this.expiresAt - 5000;
@@ -80,7 +82,7 @@ const TokenStore = {
 // ---- 4. LOGIN STARTEN -------------------------------------------------------
 async function redirectToSpotifyLogin() {
   const codeVerifier = generateRandomString(64);
-  sessionStorage.setItem("sp_code_verifier", codeVerifier);
+  localStorage.setItem("sp_code_verifier", codeVerifier);
   const codeChallenge = await generateCodeChallenge(codeVerifier);
 
   const params = new URLSearchParams({
@@ -97,7 +99,7 @@ async function redirectToSpotifyLogin() {
 
 // ---- 5. TOKEN AUSTAUSCH / REFRESH -------------------------------------------
 async function exchangeCodeForToken(code) {
-  const codeVerifier = sessionStorage.getItem("sp_code_verifier");
+  const codeVerifier = localStorage.getItem("sp_code_verifier");
   const body = new URLSearchParams({
     client_id: CLIENT_ID,
     grant_type: "authorization_code",
@@ -328,6 +330,16 @@ function updateMediaSession(track, state, isPaused) {
   }
 }
 
+// Browser-Autoplay-Policies blockieren Audio, das nicht direkt innerhalb
+// einer Nutzer-Geste gestartet wurde. Da unser eigentlicher Play-Befehl über
+// die Web API läuft (also nach einem await passiert), muss das interne
+// Audio-Element des SDK synchron beim Klick "freigeschaltet" werden.
+function unlockPlaybackAudio() {
+  if (player && typeof player.activateElement === "function") {
+    player.activateElement();
+  }
+}
+
 function wireUpMediaSessionActions() {
   if (!("mediaSession" in navigator)) return;
   navigator.mediaSession.setActionHandler("play", () => player?.resume());
@@ -362,7 +374,10 @@ function renderRowList(container, items, { onClick, subtitleFor }) {
       </div>
       <svg class="icon row-chevron" width="14" height="14"><use href="#i-chevron-right"/></svg>
     `;
-    btn.addEventListener("click", () => onClick(item));
+    btn.addEventListener("click", () => {
+      unlockPlaybackAudio();
+      onClick(item);
+    });
     container.appendChild(btn);
   });
 }
@@ -380,7 +395,10 @@ function renderTrackRows(container, tracks, onClick) {
         <div class="row-sub">${track.artists.map((a) => a.name).join(", ")}</div>
       </div>
     `;
-    row.addEventListener("click", () => onClick(track));
+    row.addEventListener("click", () => {
+      unlockPlaybackAudio();
+      onClick(track);
+    });
     container.appendChild(row);
   });
 }
@@ -408,6 +426,71 @@ function openPlayerOverlay() {
 }
 function closePlayerOverlay() {
   document.getElementById("player-overlay").classList.add("hidden");
+}
+
+// ---- 9b. SWIPE-GESTEN (wie in Spotify) ----------------------------------------
+function addSwipeHandlers(el, { onSwipeLeft, onSwipeRight, onSwipeDown } = {}) {
+  let startX = 0;
+  let startY = 0;
+  let tracking = false;
+
+  el.addEventListener(
+    "touchstart",
+    (e) => {
+      if (e.touches.length !== 1) return;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      tracking = true;
+    },
+    { passive: true }
+  );
+
+  el.addEventListener(
+    "touchend",
+    (e) => {
+      if (!tracking) return;
+      tracking = false;
+      const touch = e.changedTouches[0];
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+      const absX = Math.abs(dx);
+      const absY = Math.abs(dy);
+      const THRESHOLD = 50;
+
+      if (absY > absX && dy > THRESHOLD && onSwipeDown) {
+        onSwipeDown();
+      } else if (absX > absY && absX > THRESHOLD) {
+        if (dx < 0 && onSwipeLeft) onSwipeLeft();
+        else if (dx > 0 && onSwipeRight) onSwipeRight();
+      }
+    },
+    { passive: true }
+  );
+}
+
+function wireUpSwipeGestures() {
+  const skipNext = () => {
+    unlockPlaybackAudio();
+    player?.nextTrack();
+  };
+  const skipPrev = () => {
+    unlockPlaybackAudio();
+    player?.previousTrack();
+  };
+
+  addSwipeHandlers(document.getElementById("mini-player"), {
+    onSwipeLeft: skipNext,
+    onSwipeRight: skipPrev,
+  });
+
+  addSwipeHandlers(document.querySelector(".player-cover-wrap"), {
+    onSwipeLeft: skipNext,
+    onSwipeRight: skipPrev,
+  });
+
+  addSwipeHandlers(document.getElementById("player-overlay"), {
+    onSwipeDown: closePlayerOverlay,
+  });
 }
 
 // ---- 10. APP-INITIALISIERUNG --------------------------------------------------
@@ -475,7 +558,10 @@ async function showAppView(user) {
           playPlaylist(playlist, track.uri)
         );
 
-        document.getElementById("playlist-play-btn").onclick = () => playPlaylist(playlist);
+        document.getElementById("playlist-play-btn").onclick = () => {
+          unlockPlaybackAudio();
+          playPlaylist(playlist);
+        };
       },
     });
   } catch (err) {
@@ -497,11 +583,21 @@ function wireUpControls() {
 
   document.getElementById("mini-play-btn").addEventListener("click", (e) => {
     e.stopPropagation();
+    unlockPlaybackAudio();
     player?.togglePlay();
   });
-  document.getElementById("play-pause-btn").addEventListener("click", () => player?.togglePlay());
-  document.getElementById("next-btn").addEventListener("click", () => player?.nextTrack());
-  document.getElementById("prev-btn").addEventListener("click", () => player?.previousTrack());
+  document.getElementById("play-pause-btn").addEventListener("click", () => {
+    unlockPlaybackAudio();
+    player?.togglePlay();
+  });
+  document.getElementById("next-btn").addEventListener("click", () => {
+    unlockPlaybackAudio();
+    player?.nextTrack();
+  });
+  document.getElementById("prev-btn").addEventListener("click", () => {
+    unlockPlaybackAudio();
+    player?.previousTrack();
+  });
 
   document.getElementById("shuffle-btn").addEventListener("click", async () => {
     shuffleOn = !shuffleOn;
@@ -546,6 +642,7 @@ async function doSearch() {
 
 async function init() {
   wireUpControls();
+  wireUpSwipeGestures();
 
   const params = new URLSearchParams(window.location.search);
   const code = params.get("code");

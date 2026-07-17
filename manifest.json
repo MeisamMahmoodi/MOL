@@ -1,4 +1,5 @@
 {
+  "id": "/meine-musik-app",
   "name": "Meine Musik App",
   "short_name": "Musik",
   "description": "Persönliche Musik-App mit Spotify Web Playback SDK Integration.",

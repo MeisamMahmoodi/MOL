@@ -81,7 +81,7 @@ bestehen bleiben.
 - App läuft im Development Mode: nur bis zu 5 autorisierte Spotify-Accounts
   können sich einloggen, solange keine Extended-Quota-Freigabe von Spotify
   vorliegt.
-- Tokens liegen in `sessionStorage` (verschwinden bei Tab-/App-Schließung).
+- Tokens liegen in `localStorage` und bleiben so auch nach Schließen der App erhalten (Login bleibt bestehen, bis er abläuft oder man sich aktiv abmeldet).
 
 ## Mögliche nächste Schritte
 
