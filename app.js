@@ -816,7 +816,26 @@ async function doSearch() {
   }
 }
 
+// ---- 9c. ZOOM DEAKTIVIEREN --------------------------------------------------
+// viewport-meta + touch-action reichen auf iOS nicht immer aus (Pinch-Zoom und
+// Doppeltipp-Zoom werden von Safari teils trotzdem ausgelöst). Zusätzliche
+// Absicherung auf JS-Ebene, ohne unsere eigenen Ein-Finger-Gesten zu stören.
+function preventPinchZoom() {
+  // Zwei-Finger-Pinch (iOS ignoriert dafür teils touch-action/viewport-meta).
+  document.addEventListener("gesturestart", (e) => e.preventDefault());
+  document.addEventListener(
+    "touchmove",
+    (e) => {
+      if (e.touches.length > 1) e.preventDefault();
+    },
+    { passive: false }
+  );
+  // Doppeltipp-Zoom wird bereits von "touch-action: manipulation" (CSS) und
+  // dem viewport-meta (user-scalable=no) abgedeckt.
+}
+
 async function init() {
+  preventPinchZoom();
   wireUpControls();
   wireUpSwipeGestures();
 
