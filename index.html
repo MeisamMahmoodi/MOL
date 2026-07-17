@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Meine Musik App</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <header class="topbar">
+    <h1>🎵 Meine Musik App</h1>
+    <div id="user-info" class="user-info hidden">
+      <img id="user-avatar" src="" alt="" />
+      <span id="user-name"></span>
+      <button id="logout-btn">Logout</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Login-Ansicht -->
+    <section id="login-view" class="view">
+      <div class="login-card">
+        <p>Verbinde deinen Spotify-Premium-Account, um loszulegen.</p>
+        <button id="login-btn" class="spotify-btn">Mit Spotify einloggen</button>
+        <p class="hint">Hinweis: Zum Abspielen wird ein Spotify-<strong>Premium</strong>-Account benötigt.</p>
+      </div>
+    </section>
+
+    <!-- App-Ansicht (nach Login) -->
+    <section id="app-view" class="view hidden">
+
+      <div class="search-bar">
+        <input id="search-input" type="text" placeholder="Songs, Artists, Alben suchen…" />
+        <button id="search-btn">Suchen</button>
+      </div>
+
+      <div class="content-grid">
+        <div class="panel">
+          <h2>Suchergebnisse</h2>
+          <ul id="search-results" class="track-list"></ul>
+        </div>
+
+        <div class="panel">
+          <h2>Deine Playlists</h2>
+          <ul id="playlists" class="track-list"></ul>
+          <div id="playlist-tracks" class="track-list"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Player-Leiste -->
+  <footer id="player-bar" class="player-bar hidden">
+    <div class="now-playing">
+      <img id="track-cover" src="" alt="" />
+      <div>
+        <div id="track-name">–</div>
+        <div id="track-artist" class="muted">–</div>
+      </div>
+    </div>
+    <div class="controls">
+      <button id="prev-btn">⏮</button>
+      <button id="play-pause-btn">▶️</button>
+      <button id="next-btn">⏭</button>
+    </div>
+    <div class="volume">
+      <input id="volume-slider" type="range" min="0" max="100" value="50" />
+    </div>
+  </footer>
+
+  <!-- Spotify Web Playback SDK -->
+  <script src="https://sdk.scdn.co/spotify-player.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
