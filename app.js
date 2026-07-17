@@ -19,6 +19,7 @@ const SCOPES = [
   "playlist-read-private",
   "playlist-read-collaborative",
   "user-library-read",
+  "user-library-modify",
 ].join(" ");
 
 const AUTH_ENDPOINT = "https://accounts.spotify.com/authorize";
@@ -164,6 +165,29 @@ async function getCurrentUser() {
   return spotifyFetch("/me");
 }
 
+// ---- 6b. GESPEICHERTE SONGS (Herz-Button) ----------------------------------
+async function isTrackSaved(trackId) {
+  try {
+    const token = await getValidToken();
+    const res = await fetch(`${API_BASE}/me/tracks/contains?ids=${trackId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return !!data[0];
+  } catch (e) {
+    return false;
+  }
+}
+
+async function setTrackSaved(trackId, saved) {
+  const token = await getValidToken();
+  await fetch(`${API_BASE}/me/tracks?ids=${trackId}`, {
+    method: saved ? "PUT" : "DELETE",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+  });
+}
+
 async function searchTracks(query) {
   // Seit Februar 2026 liegt der max. "limit" für Development-Mode-Apps bei 10.
   const data = await spotifyFetch(
@@ -231,6 +255,9 @@ let shuffleOn = false;
 let repeatOn = false;
 let latestState = null;
 let progressTimer = null;
+let currentTrackId = null;
+let currentTrackSaved = false;
+let isDraggingProgress = false;
 
 window.onSpotifyWebPlaybackSDKReady = () => {};
 
@@ -260,10 +287,12 @@ function createPlayer() {
   wireUpMediaSessionActions();
 
   progressTimer = setInterval(() => {
-    if (!latestState || latestState.paused) return;
+    if (isDraggingProgress || !latestState || latestState.paused) return;
     latestState.position += 500;
     renderProgress(latestState.position, latestState.duration);
   }, 500);
+
+  wireUpProgressDrag();
 }
 
 function formatTime(ms) {
@@ -276,28 +305,112 @@ function formatTime(ms) {
 function renderProgress(position, duration) {
   const pct = duration ? Math.min(100, (position / duration) * 100) : 0;
   document.getElementById("progress-fill").style.width = pct + "%";
+  const thumb = document.getElementById("progress-thumb");
+  if (thumb) thumb.style.left = pct + "%";
   document.getElementById("time-current").textContent = formatTime(position);
   document.getElementById("time-total").textContent = formatTime(duration);
+}
+
+// ---- 7a2. FORTSCHRITTSBALKEN ZIEHEN (Scrubben) ------------------------------
+function wireUpProgressDrag() {
+  const track = document.querySelector(".progress-track");
+  if (!track) return;
+
+  function pctFromEvent(e) {
+    const rect = track.getBoundingClientRect();
+    const x = Math.min(Math.max(e.clientX - rect.left, 0), rect.width);
+    return rect.width ? x / rect.width : 0;
+  }
+
+  track.addEventListener("pointerdown", (e) => {
+    if (!latestState || !latestState.duration) return;
+    unlockPlaybackAudio();
+    isDraggingProgress = true;
+    track.classList.add("dragging");
+    track.setPointerCapture(e.pointerId);
+    renderProgress(pctFromEvent(e) * latestState.duration, latestState.duration);
+  });
+
+  track.addEventListener("pointermove", (e) => {
+    if (!isDraggingProgress || !latestState) return;
+    renderProgress(pctFromEvent(e) * latestState.duration, latestState.duration);
+  });
+
+  function endDrag(e) {
+    if (!isDraggingProgress) return;
+    isDraggingProgress = false;
+    track.classList.remove("dragging");
+    if (latestState && latestState.duration) {
+      const targetMs = pctFromEvent(e) * latestState.duration;
+      latestState.position = targetMs;
+      renderProgress(targetMs, latestState.duration);
+      player?.seek(targetMs);
+    }
+  }
+  track.addEventListener("pointerup", endDrag);
+  track.addEventListener("pointercancel", endDrag);
+}
+
+// Sanftes Überblenden statt hartem Wechsel von Bild/Text beim Songwechsel.
+function crossfadeSwap(el, apply) {
+  if (!el) return;
+  el.style.opacity = "0";
+  setTimeout(() => {
+    apply();
+    el.style.opacity = "1";
+  }, 130);
 }
 
 function updatePlayerUI(state) {
   const track = state.track_window.current_track;
   const coverUrl = track.album.images?.[0]?.url || "";
   const isPaused = state.paused;
+  const trackChanged = track.id !== currentTrackId;
 
   document.getElementById("mini-player").classList.remove("hidden");
-  document.getElementById("mini-cover").src = coverUrl;
-  document.getElementById("mini-title").textContent = track.name;
-  document.getElementById("mini-artist").textContent = track.artists.map((a) => a.name).join(", ");
   document.getElementById("mini-play-icon").setAttribute("href", isPaused ? "#i-play" : "#i-pause");
-
-  document.getElementById("player-cover").src = coverUrl;
-  document.getElementById("player-title").textContent = track.name;
-  document.getElementById("player-artist").textContent = track.artists.map((a) => a.name).join(", ");
   document.getElementById("play-pause-icon").setAttribute("href", isPaused ? "#i-play" : "#i-pause");
+
+  if (trackChanged) {
+    currentTrackId = track.id;
+    const artistNames = track.artists.map((a) => a.name).join(", ");
+
+    crossfadeSwap(document.getElementById("mini-cover"), () => {
+      document.getElementById("mini-cover").src = coverUrl;
+    });
+    crossfadeSwap(document.getElementById("mini-title"), () => {
+      document.getElementById("mini-title").textContent = track.name;
+    });
+    crossfadeSwap(document.getElementById("mini-artist"), () => {
+      document.getElementById("mini-artist").textContent = artistNames;
+    });
+    crossfadeSwap(document.getElementById("player-cover"), () => {
+      document.getElementById("player-cover").src = coverUrl;
+    });
+    crossfadeSwap(document.getElementById("player-title"), () => {
+      document.getElementById("player-title").textContent = track.name;
+    });
+    crossfadeSwap(document.getElementById("player-artist"), () => {
+      document.getElementById("player-artist").textContent = artistNames;
+    });
+
+    updateLikeButton(track.id);
+  }
 
   renderProgress(state.position, state.duration);
   updateMediaSession(track, state, isPaused);
+}
+
+// ---- 7a3. HERZ-BUTTON (Gespeicherte Songs) ----------------------------------
+function renderLikeIcon() {
+  const useEl = document.querySelector("#player-like-btn use");
+  if (useEl) useEl.setAttribute("href", currentTrackSaved ? "#i-heart" : "#i-heart-o");
+}
+
+async function updateLikeButton(trackId) {
+  currentTrackSaved = await isTrackSaved(trackId);
+  // Nur anwenden, wenn zwischenzeitlich kein neuerer Songwechsel passiert ist.
+  if (trackId === currentTrackId) renderLikeIcon();
 }
 
 // ---- 7b. MEDIA SESSION (Sperrbildschirm / Control Center) --------------------
@@ -457,10 +570,16 @@ function closePlaylistDetail() {
 }
 
 function openPlayerOverlay() {
-  document.getElementById("player-overlay").classList.remove("hidden");
+  const el = document.getElementById("player-overlay");
+  el.classList.remove("hidden");
+  // Reflow erzwingen, damit der Übergang vom geschlossenen Zustand aus startet.
+  void el.offsetWidth;
+  el.classList.add("visible");
 }
 function closePlayerOverlay() {
-  document.getElementById("player-overlay").classList.add("hidden");
+  const el = document.getElementById("player-overlay");
+  el.classList.remove("visible");
+  setTimeout(() => el.classList.add("hidden"), 320);
 }
 
 // ---- 9b. SWIPE-GESTEN (wie in Spotify) ----------------------------------------
@@ -643,6 +762,22 @@ function wireUpControls() {
     repeatOn = !repeatOn;
     document.getElementById("repeat-btn").classList.toggle("muted", !repeatOn);
     if (deviceId) setRepeat(repeatOn ? "context" : "off", deviceId).catch(() => {});
+  });
+
+  document.getElementById("player-like-btn").addEventListener("click", async () => {
+    if (!currentTrackId) return;
+    const trackId = currentTrackId;
+    currentTrackSaved = !currentTrackSaved;
+    renderLikeIcon();
+    try {
+      await setTrackSaved(trackId, currentTrackSaved);
+    } catch (e) {
+      // Bei Fehler zurücksetzen (nur wenn zwischenzeitlich kein neuer Song lief).
+      if (trackId === currentTrackId) {
+        currentTrackSaved = !currentTrackSaved;
+        renderLikeIcon();
+      }
+    }
   });
 
   document.getElementById("search-input").addEventListener("keydown", (e) => {
