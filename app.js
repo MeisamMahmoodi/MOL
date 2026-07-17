@@ -450,10 +450,16 @@ function updateMediaSession(track, state, isPaused) {
 // die Web API läuft (also nach einem await passiert), muss das interne
 // Audio-Element des SDK synchron beim Klick "freigeschaltet" werden.
 function unlockPlaybackAudio() {
-  if (player && typeof player.activateElement === "function") {
-    player.activateElement();
+  try {
+    if (player && typeof player.activateElement === "function") {
+      player.activateElement();
+    }
+  } catch (e) {
+    // Darf den eigentlichen Play-Klick niemals blockieren.
   }
-  primeSilentAnchor();
+  try {
+    primeSilentAnchor();
+  } catch (e) {}
 }
 
 // ---- 7c. SILENT-AUDIO-ANKER (Fix für Sperrbildschirm/Now-Playing) ----------
