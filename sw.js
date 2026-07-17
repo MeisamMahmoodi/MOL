@@ -7,7 +7,7 @@
    Update-Hinweis in der App an.
    ========================================================================= */
 
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const CACHE_NAME = `musik-app-${CACHE_VERSION}`;
 
 const APP_SHELL = [

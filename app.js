@@ -255,6 +255,7 @@ function createPlayer() {
   );
 
   player.connect();
+  wireUpMediaSessionActions();
 
   progressTimer = setInterval(() => {
     if (!latestState || latestState.paused) return;
@@ -294,6 +295,48 @@ function updatePlayerUI(state) {
   document.getElementById("play-pause-icon").setAttribute("href", isPaused ? "#i-play" : "#i-pause");
 
   renderProgress(state.position, state.duration);
+  updateMediaSession(track, state, isPaused);
+}
+
+// ---- 7b. MEDIA SESSION (Sperrbildschirm / Control Center) --------------------
+function updateMediaSession(track, state, isPaused) {
+  if (!("mediaSession" in navigator)) return;
+
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: track.name,
+    artist: track.artists.map((a) => a.name).join(", "),
+    album: track.album.name,
+    artwork: (track.album.images || []).map((img) => ({
+      src: img.url,
+      sizes: img.width && img.height ? `${img.width}x${img.height}` : "512x512",
+      type: "image/jpeg",
+    })),
+  });
+
+  navigator.mediaSession.playbackState = isPaused ? "paused" : "playing";
+
+  if (state.duration) {
+    try {
+      navigator.mediaSession.setPositionState({
+        duration: state.duration / 1000,
+        playbackRate: 1,
+        position: Math.min(state.position / 1000, state.duration / 1000),
+      });
+    } catch (e) {
+      // manche Browser unterstützen setPositionState nicht vollständig
+    }
+  }
+}
+
+function wireUpMediaSessionActions() {
+  if (!("mediaSession" in navigator)) return;
+  navigator.mediaSession.setActionHandler("play", () => player?.resume());
+  navigator.mediaSession.setActionHandler("pause", () => player?.pause());
+  navigator.mediaSession.setActionHandler("previoustrack", () => player?.previousTrack());
+  navigator.mediaSession.setActionHandler("nexttrack", () => player?.nextTrack());
+  navigator.mediaSession.setActionHandler("seekto", (details) => {
+    if (details.seekTime != null) player?.seek(details.seekTime * 1000);
+  });
 }
 
 // ---- 8. UI RENDERING --------------------------------------------------------
